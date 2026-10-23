@@ -1,0 +1,67 @@
+# ---- Secrets and local configuration -------------------------------------
+# Only *.example files are tracked. The dev values in a real env file
+# (JWT_SECRET, DB password) must never reach a server.
+.env
+.env.*
+!.env.example
+!.env.production.example
+
+*.pem
+*.key
+*.p12
+*.pfx
+*.crt
+id_rsa*
+
+# ---- Python ---------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+env/
+*.egg-info/
+.eggs/
+build/
+dist/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+
+# ---- Runtime data ---------------------------------------------------------
+# Uploaded product images when S3 isn't configured. Seed artwork is generated
+# by scripts/seed_demo.py, so none of this belongs in the repo.
+media/
+*.sqlite3
+*.db
+pgdata/
+esdata/
+
+# ---- Business data --------------------------------------------------------
+# The warehouse workbook: customer and stock data, not code.
+*.xlsx
+*.xls
+*.xlsm
+.import-*.xlsx
+
+# ---- Logs and scratch ----------------------------------------------------
+*.log
+logs/
+tmp/
+*.bak
+*.orig
+*.rej
+
+# ---- Editors and OS -------------------------------------------------------
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+._*
+Thumbs.db

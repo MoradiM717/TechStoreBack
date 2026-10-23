@@ -1,0 +1,78 @@
+# Production stack for the API and its datastores.
+#
+#   docker compose -f docker-compose.prod.yml --env-file .env.production up -d --build
+#
+# Differences from the development compose that matter:
+#   - no source bind-mounts and no --reload; the image is the artefact
+#   - Postgres and Elasticsearch are not published to the host, only to the
+#     compose network, so the database is not reachable from outside the box
+#   - every credential comes from .env.production; nothing is defaulted in here
+#
+# This stack terminates plain HTTP on 8000. Put a reverse proxy with TLS in
+# front of it before it faces the internet — see DEPLOY.md.
+services:
+  postgres:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER}"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.15.1
+    restart: unless-stopped
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=false
+      - "ES_JAVA_OPTS=${ES_JAVA_OPTS:--Xms1g -Xmx1g}"
+    volumes:
+      - esdata:/usr/share/elasticsearch/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:9200/_cluster/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 12
+
+  backend:
+    build: .
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      ELASTICSEARCH_URL: http://elasticsearch:9200
+      JWT_SECRET: ${JWT_SECRET}
+      ACCESS_TOKEN_EXPIRE_MINUTES: ${ACCESS_TOKEN_EXPIRE_MINUTES:-480}
+      CORS_ORIGINS: ${CORS_ORIGINS}
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL}
+      MEDIA_ROOT: /app/media
+      S3_ENDPOINT_URL: ${S3_ENDPOINT_URL:-}
+      S3_BUCKET: ${S3_BUCKET:-}
+      S3_ACCESS_KEY: ${S3_ACCESS_KEY:-}
+      S3_SECRET_KEY: ${S3_SECRET_KEY:-}
+      S3_PUBLIC_BASE_URL: ${S3_PUBLIC_BASE_URL:-}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      elasticsearch:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:8000:8000"
+    volumes:
+      # Uploaded images survive a redeploy. Point S3_* at object storage instead
+      # if you ever run more than one backend container.
+      - media:/app/media
+    command: >
+      uvicorn app.main:app --host 0.0.0.0 --port 8000
+      --workers ${BACKEND_WORKERS:-4} --proxy-headers --forwarded-allow-ips='*'
+
+volumes:
+  pgdata:
+  esdata:
+  media:

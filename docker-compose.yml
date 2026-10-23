@@ -1,0 +1,63 @@
+# Local development stack for the API and its two datastores.
+#
+#   cp .env.example .env && docker compose up
+#
+# The frontends live in their own repository (TechStoreFront) and talk to this
+# stack over http://localhost:8000. Nothing here needs them to be running.
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: techstore
+      POSTGRES_PASSWORD: techstore
+      POSTGRES_DB: techstore
+    ports:
+      # 5433 on the host: 5432 is commonly already taken by another project's
+      # Postgres. Inside the compose network the service is still on 5432.
+      - "5433:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U techstore"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.15.1
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=false
+      - "ES_JAVA_OPTS=-Xms512m -Xmx512m"
+    ports:
+      - "9200:9200"
+    volumes:
+      - esdata:/usr/share/elasticsearch/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:9200/_cluster/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+  backend:
+    build: .
+    env_file: ./.env
+    # These override the localhost values in .env: inside the compose network the
+    # services are reachable by service name, not on the host's loopback.
+    environment:
+      DATABASE_URL: postgresql://techstore:techstore@postgres:5432/techstore
+      ELASTICSEARCH_URL: http://elasticsearch:9200
+    depends_on:
+      postgres:
+        condition: service_healthy
+      elasticsearch:
+        condition: service_started
+    ports:
+      - "8000:8000"
+    volumes:
+      - .:/app
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+
+volumes:
+  pgdata:
+  esdata:
