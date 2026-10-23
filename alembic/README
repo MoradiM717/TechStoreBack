@@ -1,0 +1,7 @@
+Alembic migrations for TechStore.
+
+  alembic upgrade head                      # apply
+  alembic revision --autogenerate -m "..."  # after changing models/
+  alembic downgrade -1                      # roll back one
+
+The database URL is read from DATABASE_URL via app.core.config, not from alembic.ini.
