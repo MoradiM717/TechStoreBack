@@ -1,0 +1,422 @@
+---
+# TechStore on ArvanCloud Container as a Service.
+# Project: tech-store
+# Namespace: 340807bbedab0817b72deb2d879d33ac2d508181-tech-store
+#
+# ArvanCloud creates and owns the namespace, so there is no Namespace resource
+# here — every object below just targets it by name.
+#
+# Replace every <...> placeholder. Create the Secret separately (see README.md
+# in this directory) — do not commit filled credentials.
+#
+#   kubectl apply -f techstore.yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: techstore-config
+  namespace: 340807bbedab0817b72deb2d879d33ac2d508181-tech-store
+data:
+  ELASTICSEARCH_URL: "http://elasticsearch:9200"
+  ACCESS_TOKEN_EXPIRE_MINUTES: "480"
+  MEDIA_ROOT: "/app/media"
+  PUBLIC_BASE_URL: "https://api.karentechstore.com"
+  # Must list both frontend origins exactly, scheme included, or the browser
+  # blocks every request and the storefront looks broken with nothing in the log.
+  CORS_ORIGINS: "https://shop.karentechstore.com,https://admin.karentechstore.com"
+---
+# ---------------------------------------------------------------- Postgres ---
+# Self-hosted to keep cost down. This gives you no automated backups: see the
+# note in README.md before you put real customer quotes in it.
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  namespace: 340807bbedab0817b72deb2d879d33ac2d508181-tech-store
+spec:
+  selector:
+    app: postgres
+  ports:
+    - port: 5432
+      targetPort: 5432
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: postgres
+  namespace: 340807bbedab0817b72deb2d879d33ac2d508181-tech-store
+spec:
+  serviceName: postgres
+  replicas: 1
+  selector:
+    matchLabels:
+      app: postgres
+  template:
+    metadata:
+      labels:
+        app: postgres
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:16
+          ports:
+            - containerPort: 5432
+          env:
+            - name: POSTGRES_USER
+              valueFrom:
+                secretKeyRef: { name: techstore-secrets, key: POSTGRES_USER }
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef: { name: techstore-secrets, key: POSTGRES_PASSWORD }
+            - name: POSTGRES_DB
+              valueFrom:
+                secretKeyRef: { name: techstore-secrets, key: POSTGRES_DB }
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          resources:
+            requests: { cpu: "250m", memory: "512Mi", ephemeral-storage: "1Gi" }
+            limits:   { cpu: "500m", memory: "1024Mi", ephemeral-storage: "1Gi" }
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", "techstore"]
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 10Gi
+---
+# ----------------------------------------------------------- Elasticsearch ---
+# 512MB heap is ample for 483 documents and halves the cost of the biggest pod
+# in this stack. allow_mmap=false avoids needing a privileged initContainer to
+# raise vm.max_map_count, which managed clusters normally refuse.
+apiVersion: v1
+kind: Service
+metadata:
+  name: elasticsearch
+  namespace: 340807bbedab0817b72deb2d879d33ac2d508181-tech-store
+spec:
+  selector:
+    app: elasticsearch
+  ports:
+    - port: 9200
+      targetPort: 9200
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: elasticsearch
+  namespace: 340807bbedab0817b72deb2d879d33ac2d508181-tech-store
+spec:
+  serviceName: elasticsearch
+  replicas: 1
+  selector:
+    matchLabels:
+      app: elasticsearch
+  template:
+    metadata:
+      labels:
+        app: elasticsearch
+    spec:
+      containers:
+        - name: elasticsearch
+          image: docker.elastic.co/elasticsearch/elasticsearch:8.15.1
+          ports:
+            - containerPort: 9200
+          env:
+            - name: discovery.type
+              value: single-node
+            - name: xpack.security.enabled
+              value: "false"
+            - name: node.store.allow_mmap
+              value: "false"
+            - name: ES_JAVA_OPTS
+              value: "-Xms512m -Xmx512m"
+          resources:
+            requests: { cpu: "375m", memory: "768Mi", ephemeral-storage: "1Gi" }
+            limits:   { cpu: "500m", memory: "1024Mi", ephemeral-storage: "1Gi" }
+          readinessProbe:
+            httpGet:
+              path: /_cluster/health
+              port: 9200
+            initialDelaySeconds: 30
+            periodSeconds: 15
+            failureThreshold: 6
+          volumeMounts:
+            - name: data
+              mountPath: /usr/share/elasticsearch/data
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 5Gi
+---
+# ----------------------------------------------------------- DB migrations ---
+# A Job, not an initContainer: with 2 backend replicas both would run
+# `alembic upgrade head` at once and concurrent DDL fails on one of them.
+# Delete and re-apply this Job on every deploy that adds a migration.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: migrate
+  namespace: 340807bbedab0817b72deb2d879d33ac2d508181-tech-store
+spec:
+  backoffLimit: 3
+  template:
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: alembic
+          image: <registry>/techstore-backend:<tag>
+          command: ["alembic", "upgrade", "head"]
+          envFrom:
+            - configMapRef: { name: techstore-config }
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef: { name: techstore-secrets, key: DATABASE_URL }
+          resources:
+            requests: { cpu: "125m", memory: "256Mi", ephemeral-storage: "512Mi" }
+            limits:   { cpu: "250m", memory: "512Mi", ephemeral-storage: "1Gi" }
+---
+# ------------------------------------------------------------------ Backend ---
+apiVersion: v1
+kind: Service
+metadata:
+  name: backend
+  namespace: 340807bbedab0817b72deb2d879d33ac2d508181-tech-store
+spec:
+  selector:
+    app: backend
+  ports:
+    - port: 8000
+      targetPort: 8000
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: backend
+  namespace: 340807bbedab0817b72deb2d879d33ac2d508181-tech-store
+spec:
+  # 2 replicas is the whole reliability story here: a restart, a node drain or
+  # an OOM on one pod does not take the API down.
+  replicas: 2
+  selector:
+    matchLabels:
+      app: backend
+  strategy:
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  template:
+    metadata:
+      labels:
+        app: backend
+    spec:
+      containers:
+        - name: backend
+          image: <registry>/techstore-backend:<tag>
+          # One uvicorn worker per pod: measured ~100MB RSS per worker under
+          # search load, so 2 pods x 1 worker costs less than 1 pod x 2 workers
+          # and survives a pod loss. --proxy-headers so the app trusts the
+          # ingress's X-Forwarded-Proto and builds https:// image URLs.
+          command: ["uvicorn"]
+          args:
+            - "app.main:app"
+            - "--host=0.0.0.0"
+            - "--port=8000"
+            - "--workers=1"
+            - "--proxy-headers"
+            - "--forwarded-allow-ips=*"
+          ports:
+            - containerPort: 8000
+          envFrom:
+            - configMapRef: { name: techstore-config }
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef: { name: techstore-secrets, key: DATABASE_URL }
+            - name: JWT_SECRET
+              valueFrom:
+                secretKeyRef: { name: techstore-secrets, key: JWT_SECRET }
+            - name: S3_ENDPOINT_URL
+              valueFrom:
+                secretKeyRef: { name: techstore-secrets, key: S3_ENDPOINT_URL }
+            - name: S3_BUCKET
+              valueFrom:
+                secretKeyRef: { name: techstore-secrets, key: S3_BUCKET }
+            - name: S3_ACCESS_KEY
+              valueFrom:
+                secretKeyRef: { name: techstore-secrets, key: S3_ACCESS_KEY }
+            - name: S3_SECRET_KEY
+              valueFrom:
+                secretKeyRef: { name: techstore-secrets, key: S3_SECRET_KEY }
+            - name: S3_PUBLIC_BASE_URL
+              valueFrom:
+                secretKeyRef: { name: techstore-secrets, key: S3_PUBLIC_BASE_URL }
+          resources:
+            requests: { cpu: "125m", memory: "256Mi", ephemeral-storage: "512Mi" }
+            limits:   { cpu: "250m", memory: "512Mi", ephemeral-storage: "1Gi" }
+          # /health returns 200 even when Elasticsearch is unreachable (the
+          # degradation is in the body only). That is deliberate: an ES outage
+          # must not pull the API out of rotation and take the storefront with it.
+          readinessProbe:
+            httpGet: { path: /health, port: 8000 }
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /health, port: 8000 }
+            initialDelaySeconds: 30
+            periodSeconds: 20
+            failureThreshold: 3
+---
+# --------------------------------------------------------------- Storefront ---
+apiVersion: v1
+kind: Service
+metadata:
+  name: storefront
+  namespace: 340807bbedab0817b72deb2d879d33ac2d508181-tech-store
+spec:
+  selector:
+    app: storefront
+  ports:
+    - port: 3000
+      targetPort: 3000
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: storefront
+  namespace: 340807bbedab0817b72deb2d879d33ac2d508181-tech-store
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: storefront
+  strategy:
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  template:
+    metadata:
+      labels:
+        app: storefront
+    spec:
+      containers:
+        - name: storefront
+          # NEXT_PUBLIC_API_URL is inlined at build time, so it is baked into
+          # this tag. Changing the API address needs a rebuild, not a restart.
+          image: <registry>/techstore-storefront:<tag>
+          ports:
+            - containerPort: 3000
+          resources:
+            requests: { cpu: "125m", memory: "256Mi", ephemeral-storage: "512Mi" }
+            limits:   { cpu: "250m", memory: "512Mi", ephemeral-storage: "1Gi" }
+          # TCP, not an HTTP GET on /: that page fetches the catalogue, so an
+          # API blip would fail readiness and take the storefront out too.
+          readinessProbe:
+            tcpSocket: { port: 3000 }
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          livenessProbe:
+            tcpSocket: { port: 3000 }
+            initialDelaySeconds: 30
+            periodSeconds: 20
+---
+# -------------------------------------------------------------------- Admin ---
+apiVersion: v1
+kind: Service
+metadata:
+  name: admin
+  namespace: 340807bbedab0817b72deb2d879d33ac2d508181-tech-store
+spec:
+  selector:
+    app: admin
+  ports:
+    - port: 3001
+      targetPort: 3001
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: admin
+  namespace: 340807bbedab0817b72deb2d879d33ac2d508181-tech-store
+spec:
+  # 1 replica: staff tooling, a few seconds of downtime during a deploy is fine
+  # and this is the cheapest place to save.
+  replicas: 1
+  selector:
+    matchLabels:
+      app: admin
+  template:
+    metadata:
+      labels:
+        app: admin
+    spec:
+      containers:
+        - name: admin
+          image: <registry>/techstore-admin:<tag>
+          ports:
+            - containerPort: 3001
+          resources:
+            requests: { cpu: "125m", memory: "256Mi", ephemeral-storage: "512Mi" }
+            limits:   { cpu: "250m", memory: "512Mi", ephemeral-storage: "1Gi" }
+          readinessProbe:
+            tcpSocket: { port: 3001 }
+            initialDelaySeconds: 10
+            periodSeconds: 10
+---
+# ------------------------------------------------------------------ Ingress ---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: techstore
+  namespace: 340807bbedab0817b72deb2d879d33ac2d508181-tech-store
+  annotations:
+    # Product image uploads from the admin panel.
+    nginx.ingress.kubernetes.io/proxy-body-size: "20m"
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts:
+        - shop.karentechstore.com
+        - admin.karentechstore.com
+        - api.karentechstore.com
+      secretName: techstore-tls
+  rules:
+    - host: shop.karentechstore.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: storefront
+                port: { number: 3000 }
+    - host: admin.karentechstore.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: admin
+                port: { number: 3001 }
+    - host: api.karentechstore.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: backend
+                port: { number: 8000 }

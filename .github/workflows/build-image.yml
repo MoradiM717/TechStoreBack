@@ -1,0 +1,35 @@
+name: build image
+
+# Images are built here rather than locally: the cluster can pull ghcr.io in
+# ~20s, while docker.elastic.co is unreachable from Iran and Docker Hub is slow.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          # :latest is for humans; deployments pin the sha so a rollout always
+          # pulls a new digest instead of silently reusing a cached tag.
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/techstore-backend:${{ github.sha }}
+            ghcr.io/${{ github.repository_owner }}/techstore-backend:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

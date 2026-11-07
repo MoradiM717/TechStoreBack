@@ -65,3 +65,12 @@ tmp/
 .DS_Store
 ._*
 Thumbs.db
+
+# ---- Cloud credentials ----------------------------------------------------
+# ArvanCloud API key and any kubeconfig built from it. These are live
+# production credentials for the cluster; never commit them.
+kts_arvan_api_key
+*arvan*key*
+kubeconfig
+kubeconfig*
+*.kubeconfig

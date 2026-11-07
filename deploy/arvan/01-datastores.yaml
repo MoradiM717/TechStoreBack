@@ -1,0 +1,150 @@
+---
+# Postgres and Elasticsearch for TechStore on ArvanCloud CaaS.
+#
+# Region ir-central1 (the only one that accepts writes; ir-northwest1 has
+# resource creation disabled). Namespace is created and owned by ArvanCloud.
+#
+# Arvan's admission webhook enforces memory_Mi == 2 * cpu_millicores exactly:
+# 250m/512Mi is rejected, 250m/500Mi is accepted. Every block below obeys that.
+#
+# Every image comes from docker.arvancloud.ir, Arvan's Docker Hub mirror.
+# docker.elastic.co is unreachable from this cluster (i/o timeout), and plain
+# Docker Hub took ~2 minutes per pull. The mirror serves the identical
+# Elastic-published elasticsearch image.
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  namespace: 340807bbedab0817b72deb2d879d33ac2d508181-tech-store
+spec:
+  selector:
+    app: postgres
+  ports:
+    - port: 5432
+      targetPort: 5432
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: postgres
+  namespace: 340807bbedab0817b72deb2d879d33ac2d508181-tech-store
+spec:
+  serviceName: postgres
+  replicas: 1
+  selector:
+    matchLabels:
+      app: postgres
+  template:
+    metadata:
+      labels:
+        app: postgres
+    spec:
+      containers:
+        - name: postgres
+          image: docker.arvancloud.ir/postgres:16
+          ports:
+            - containerPort: 5432
+          env:
+            - name: POSTGRES_USER
+              valueFrom:
+                secretKeyRef: { name: techstore-secrets, key: POSTGRES_USER }
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef: { name: techstore-secrets, key: POSTGRES_PASSWORD }
+            - name: POSTGRES_DB
+              valueFrom:
+                secretKeyRef: { name: techstore-secrets, key: POSTGRES_DB }
+            # Subdirectory, not the mount root: initdb refuses a non-empty
+            # directory and a PVC mount root may contain lost+found.
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          resources:
+            requests: { cpu: "500m", memory: "1000Mi", ephemeral-storage: "1Gi" }
+            limits:   { cpu: "500m", memory: "1000Mi", ephemeral-storage: "1Gi" }
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", "techstore", "-d", "techstore"]
+            initialDelaySeconds: 15
+            periodSeconds: 10
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 10Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: elasticsearch
+  namespace: 340807bbedab0817b72deb2d879d33ac2d508181-tech-store
+spec:
+  selector:
+    app: elasticsearch
+  ports:
+    - port: 9200
+      targetPort: 9200
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: elasticsearch
+  namespace: 340807bbedab0817b72deb2d879d33ac2d508181-tech-store
+spec:
+  serviceName: elasticsearch
+  replicas: 1
+  selector:
+    matchLabels:
+      app: elasticsearch
+  template:
+    metadata:
+      labels:
+        app: elasticsearch
+    spec:
+      # The elasticsearch image runs as uid 1000, but the CSI volume mounts
+      # root-owned, so ES cannot create data/node.lock and dies at boot.
+      # fsGroup makes the mount group-writable for that uid.
+      securityContext:
+        fsGroup: 1000
+      containers:
+        - name: elasticsearch
+          image: docker.arvancloud.ir/elasticsearch:8.15.1
+          ports:
+            - containerPort: 9200
+          env:
+            - name: discovery.type
+              value: single-node
+            # No auth: ES is ClusterIP-only and never exposed through the Ingress.
+            - name: xpack.security.enabled
+              value: "false"
+            # Avoids needing a privileged initContainer to raise vm.max_map_count.
+            - name: node.store.allow_mmap
+              value: "false"
+            - name: ES_JAVA_OPTS
+              value: "-Xms512m -Xmx512m"
+          resources:
+            requests: { cpu: "500m", memory: "1000Mi", ephemeral-storage: "2Gi" }
+            limits:   { cpu: "500m", memory: "1000Mi", ephemeral-storage: "2Gi" }
+          readinessProbe:
+            httpGet:
+              path: /_cluster/health
+              port: 9200
+            initialDelaySeconds: 40
+            periodSeconds: 15
+            failureThreshold: 10
+          volumeMounts:
+            - name: data
+              mountPath: /usr/share/elasticsearch/data
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 5Gi
