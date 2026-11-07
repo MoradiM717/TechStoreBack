@@ -28,8 +28,10 @@ jobs:
           push: true
           # :latest is for humans; deployments pin the sha so a rollout always
           # pulls a new digest instead of silently reusing a cached tag.
+          # Owner hardcoded lowercase: github.repository_owner is "MoradiM717"
+          # and a registry repository name must be lowercase.
           tags: |
-            ghcr.io/${{ github.repository_owner }}/techstore-backend:${{ github.sha }}
-            ghcr.io/${{ github.repository_owner }}/techstore-backend:latest
+            ghcr.io/moradim717/techstore-backend:${{ github.sha }}
+            ghcr.io/moradim717/techstore-backend:latest
           cache-from: type=gha
           cache-to: type=gha,mode=max
