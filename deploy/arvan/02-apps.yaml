@@ -162,8 +162,9 @@ spec:
     spec:
       containers:
         - name: storefront
-          # https://api.karentechstore.com is compiled into this image.
-          image: ghcr.io/moradim717/techstore-storefront:19e9ee877dfd91f6a0cf1f1198a6ee1d8e2adadc
+          # https://api.karentechstore.com is compiled into this image, and the
+          # admin's image also has https://karentechstore.com as the store link.
+          image: ghcr.io/moradim717/techstore-storefront:50e3e10a2691f301f88ced03148879043f5f7807
           ports:
             - containerPort: 3000
           resources:
@@ -211,7 +212,7 @@ spec:
     spec:
       containers:
         - name: admin
-          image: ghcr.io/moradim717/techstore-admin:19e9ee877dfd91f6a0cf1f1198a6ee1d8e2adadc
+          image: ghcr.io/moradim717/techstore-admin:50e3e10a2691f301f88ced03148879043f5f7807
           ports:
             - containerPort: 3001
           resources:
