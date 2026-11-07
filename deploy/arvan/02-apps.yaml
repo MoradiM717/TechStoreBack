@@ -1,0 +1,223 @@
+---
+# Backend, storefront, admin and the migration Job.
+#
+# Images are pinned to a commit sha, never :latest, so a rollout always pulls a
+# new digest instead of silently reusing a cached tag. Bump these when CI
+# publishes a new build.
+#
+# Arvan's admission webhook enforces memory_Mi == 2 * cpu_millicores exactly.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: media
+  namespace: 340807bbedab0817b72deb2d879d33ac2d508181-tech-store
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 5Gi
+---
+# Runs alembic once per deploy. A Job rather than an initContainer so that
+# scaling the backend past one replica never runs concurrent DDL.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: migrate
+  namespace: 340807bbedab0817b72deb2d879d33ac2d508181-tech-store
+spec:
+  backoffLimit: 3
+  template:
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: alembic
+          image: ghcr.io/moradim717/techstore-backend:798dba9bb786b5b531e9aaadff7f92c29e331ebb
+          command: ["alembic", "upgrade", "head"]
+          envFrom:
+            - configMapRef: { name: techstore-config }
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef: { name: techstore-secrets, key: DATABASE_URL }
+            - name: JWT_SECRET
+              valueFrom:
+                secretKeyRef: { name: techstore-secrets, key: JWT_SECRET }
+          resources:
+            requests: { cpu: "125m", memory: "250Mi", ephemeral-storage: "512Mi" }
+            limits:   { cpu: "125m", memory: "250Mi", ephemeral-storage: "512Mi" }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: backend
+  namespace: 340807bbedab0817b72deb2d879d33ac2d508181-tech-store
+spec:
+  selector:
+    app: backend
+  ports:
+    - port: 8000
+      targetPort: 8000
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: backend
+  namespace: 340807bbedab0817b72deb2d879d33ac2d508181-tech-store
+spec:
+  # One replica, because uploaded product images live on a ReadWriteOnce volume
+  # that a second pod cannot mount. Configure S3_* (ArvanCloud object storage)
+  # and this can go to 2 replicas with the volume removed — see deploy README.
+  replicas: 1
+  # Recreate, not RollingUpdate: with RWO storage a surging pod cannot attach
+  # the volume while the old one still holds it, and the rollout would deadlock.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: backend
+  template:
+    metadata:
+      labels:
+        app: backend
+    spec:
+      containers:
+        - name: backend
+          image: ghcr.io/moradim717/techstore-backend:798dba9bb786b5b531e9aaadff7f92c29e331ebb
+          # --proxy-headers so uvicorn trusts the ingress's X-Forwarded-Proto and
+          # builds https:// image URLs instead of http://.
+          command: ["uvicorn"]
+          args:
+            - "app.main:app"
+            - "--host=0.0.0.0"
+            - "--port=8000"
+            - "--workers=2"
+            - "--proxy-headers"
+            - "--forwarded-allow-ips=*"
+          ports:
+            - containerPort: 8000
+          envFrom:
+            - configMapRef: { name: techstore-config }
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef: { name: techstore-secrets, key: DATABASE_URL }
+            - name: JWT_SECRET
+              valueFrom:
+                secretKeyRef: { name: techstore-secrets, key: JWT_SECRET }
+          resources:
+            requests: { cpu: "250m", memory: "500Mi", ephemeral-storage: "1Gi" }
+            limits:   { cpu: "250m", memory: "500Mi", ephemeral-storage: "1Gi" }
+          # /health returns 200 even when Elasticsearch is unreachable (the
+          # degradation is reported in the body). Deliberate: an ES outage must
+          # not pull the API out of rotation and take the storefront with it.
+          readinessProbe:
+            httpGet: { path: /health, port: 8000 }
+            initialDelaySeconds: 15
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /health, port: 8000 }
+            initialDelaySeconds: 40
+            periodSeconds: 20
+            failureThreshold: 3
+          volumeMounts:
+            - name: media
+              mountPath: /app/media
+      volumes:
+        - name: media
+          persistentVolumeClaim:
+            claimName: media
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: storefront
+  namespace: 340807bbedab0817b72deb2d879d33ac2d508181-tech-store
+spec:
+  selector:
+    app: storefront
+  ports:
+    - port: 3000
+      targetPort: 3000
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: storefront
+  namespace: 340807bbedab0817b72deb2d879d33ac2d508181-tech-store
+spec:
+  # Two replicas: stateless, so this is the cheap way to make a deploy or a
+  # node drain invisible to shoppers.
+  replicas: 2
+  strategy:
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  selector:
+    matchLabels:
+      app: storefront
+  template:
+    metadata:
+      labels:
+        app: storefront
+    spec:
+      containers:
+        - name: storefront
+          # https://api.karentechstore.com is compiled into this image.
+          image: ghcr.io/moradim717/techstore-storefront:19e9ee877dfd91f6a0cf1f1198a6ee1d8e2adadc
+          ports:
+            - containerPort: 3000
+          resources:
+            requests: { cpu: "250m", memory: "500Mi", ephemeral-storage: "1Gi" }
+            limits:   { cpu: "250m", memory: "500Mi", ephemeral-storage: "1Gi" }
+          # TCP, not GET /: the home page fetches the catalogue, so an API blip
+          # would fail readiness and pull the storefront out of rotation too.
+          readinessProbe:
+            tcpSocket: { port: 3000 }
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          livenessProbe:
+            tcpSocket: { port: 3000 }
+            initialDelaySeconds: 40
+            periodSeconds: 20
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: admin
+  namespace: 340807bbedab0817b72deb2d879d33ac2d508181-tech-store
+spec:
+  selector:
+    app: admin
+  ports:
+    - port: 3001
+      targetPort: 3001
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: admin
+  namespace: 340807bbedab0817b72deb2d879d33ac2d508181-tech-store
+spec:
+  # One replica: staff tooling, so a few seconds of downtime during a deploy is
+  # acceptable and this is the cheapest place to save.
+  replicas: 1
+  selector:
+    matchLabels:
+      app: admin
+  template:
+    metadata:
+      labels:
+        app: admin
+    spec:
+      containers:
+        - name: admin
+          image: ghcr.io/moradim717/techstore-admin:19e9ee877dfd91f6a0cf1f1198a6ee1d8e2adadc
+          ports:
+            - containerPort: 3001
+          resources:
+            requests: { cpu: "125m", memory: "250Mi", ephemeral-storage: "1Gi" }
+            limits:   { cpu: "125m", memory: "250Mi", ephemeral-storage: "1Gi" }
+          readinessProbe:
+            tcpSocket: { port: 3001 }
+            initialDelaySeconds: 10
+            periodSeconds: 10

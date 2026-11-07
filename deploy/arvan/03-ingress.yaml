@@ -1,0 +1,53 @@
+---
+# Public routing for karentechstore.com.
+#
+# The storefront is the apex domain, but the apex rule lives in the separate
+# `storefront-ingress` that the ArvanCloud panel created when the domain was
+# attached (the panel owns that object, and its TLS). This Ingress deliberately
+# does not claim the apex: nginx rejects a duplicate host+path. It covers www,
+# admin and api only.
+#
+# No `tls:` block and no ingressClassName: ArvanCloud terminates TLS at its own
+# edge once the domain is attached in the CaaS panel, and the cluster's ingress
+# class is not readable with this API key. If Arvan's controller needs an
+# explicit class, add `ingressClassName:` with the value their panel shows.
+#
+# DNS: point apex/www/admin/api at the address this Ingress reports
+# (`kubectl get ingress techstore`).
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: techstore
+  namespace: 340807bbedab0817b72deb2d879d33ac2d508181-tech-store
+  annotations:
+    # Product image uploads from the admin panel.
+    nginx.ingress.kubernetes.io/proxy-body-size: "20m"
+spec:
+  rules:
+    - host: www.karentechstore.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: storefront
+                port: { number: 3000 }
+    - host: admin.karentechstore.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: admin
+                port: { number: 3001 }
+    - host: api.karentechstore.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: backend
+                port: { number: 8000 }
