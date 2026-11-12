@@ -164,6 +164,12 @@ spec:
       labels:
         app: web
     spec:
+      # techstore-web is a private package (TechStoreFront is a private repo),
+      # so the pull needs credentials. The secret holds a GitHub token with
+      # read:packages; if that token is ever revoked or rotated, pulls start
+      # failing with ImagePullBackOff and the secret must be recreated.
+      imagePullSecrets:
+        - name: ghcr-pull
       containers:
         - name: web
           # Carries both Next.js standalone builds; the entrypoint runs the
