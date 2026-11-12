@@ -90,7 +90,7 @@ spec:
         accessModes: ["ReadWriteOnce"]
         resources:
           requests:
-            storage: 10Gi
+            storage: 1Gi
 ---
 # ----------------------------------------------------------- Elasticsearch ---
 # 512MB heap is ample for 483 documents and halves the cost of the biggest pod
@@ -158,7 +158,7 @@ spec:
         accessModes: ["ReadWriteOnce"]
         resources:
           requests:
-            storage: 5Gi
+            storage: 1Gi
 ---
 # ----------------------------------------------------------- DB migrations ---
 # A Job, not an initContainer: with 2 backend replicas both would run

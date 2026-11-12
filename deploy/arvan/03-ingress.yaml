@@ -31,7 +31,7 @@ spec:
             pathType: Prefix
             backend:
               service:
-                name: storefront
+                name: web
                 port: { number: 3000 }
     - host: admin.karentechstore.com
       http:
@@ -40,7 +40,7 @@ spec:
             pathType: Prefix
             backend:
               service:
-                name: admin
+                name: web
                 port: { number: 3001 }
     - host: api.karentechstore.com
       http:

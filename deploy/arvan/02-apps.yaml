@@ -15,7 +15,7 @@ spec:
   accessModes: ["ReadWriteOnce"]
   resources:
     requests:
-      storage: 5Gi
+      storage: 1Gi
 ---
 # Runs alembic once per deploy. A Job rather than an initContainer so that
 # scaling the backend past one replica never runs concurrent DDL.
@@ -130,48 +130,60 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: storefront
+  name: web
   namespace: 340807bbedab0817b72deb2d879d33ac2d508181-tech-store
 spec:
   selector:
-    app: storefront
+    app: web
+  # One pod serves both frontends, so one Service carries both ports and the
+  # Ingress picks between them by host.
   ports:
-    - port: 3000
+    - name: storefront
+      port: 3000
       targetPort: 3000
+    - name: admin
+      port: 3001
+      targetPort: 3001
 ---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: storefront
+  name: web
   namespace: 340807bbedab0817b72deb2d879d33ac2d508181-tech-store
 spec:
-  # Two replicas: stateless, so this is the cheap way to make a deploy or a
-  # node drain invisible to shoppers.
-  replicas: 2
+  replicas: 1
   strategy:
     rollingUpdate:
       maxUnavailable: 0
       maxSurge: 1
   selector:
     matchLabels:
-      app: storefront
+      app: web
   template:
     metadata:
       labels:
-        app: storefront
+        app: web
     spec:
       containers:
-        - name: storefront
-          # https://api.karentechstore.com is compiled into this image, and the
-          # admin's image also has https://karentechstore.com as the store link.
-          image: ghcr.io/moradim717/techstore-storefront:50e3e10a2691f301f88ced03148879043f5f7807
+        - name: web
+          # Carries both Next.js standalone builds; the entrypoint runs the
+          # storefront on 3000 and the admin panel on 3001, and exits if either
+          # dies so this pod is restarted rather than half-serving.
+          # https://api.karentechstore.com and https://karentechstore.com are
+          # compiled into this image.
+          image: ghcr.io/moradim717/techstore-web:ddae98140374e42aa916f8dfcac75bcb234919ca
           ports:
-            - containerPort: 3000
+            - name: storefront
+              containerPort: 3000
+            - name: admin
+              containerPort: 3001
           resources:
             requests: { cpu: "250m", memory: "500Mi", ephemeral-storage: "1Gi" }
             limits:   { cpu: "250m", memory: "500Mi", ephemeral-storage: "1Gi" }
-          # TCP, not GET /: the home page fetches the catalogue, so an API blip
-          # would fail readiness and pull the storefront out of rotation too.
+          # TCP on the storefront port, not GET /: the home page fetches the
+          # catalogue, so an API blip would otherwise fail readiness and pull the
+          # storefront out of rotation. The admin process is covered by the
+          # entrypoint, which takes the container down if it exits.
           readinessProbe:
             tcpSocket: { port: 3000 }
             initialDelaySeconds: 10
@@ -180,45 +192,3 @@ spec:
             tcpSocket: { port: 3000 }
             initialDelaySeconds: 40
             periodSeconds: 20
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: admin
-  namespace: 340807bbedab0817b72deb2d879d33ac2d508181-tech-store
-spec:
-  selector:
-    app: admin
-  ports:
-    - port: 3001
-      targetPort: 3001
----
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: admin
-  namespace: 340807bbedab0817b72deb2d879d33ac2d508181-tech-store
-spec:
-  # One replica: staff tooling, so a few seconds of downtime during a deploy is
-  # acceptable and this is the cheapest place to save.
-  replicas: 1
-  selector:
-    matchLabels:
-      app: admin
-  template:
-    metadata:
-      labels:
-        app: admin
-    spec:
-      containers:
-        - name: admin
-          image: ghcr.io/moradim717/techstore-admin:50e3e10a2691f301f88ced03148879043f5f7807
-          ports:
-            - containerPort: 3001
-          resources:
-            requests: { cpu: "125m", memory: "250Mi", ephemeral-storage: "1Gi" }
-            limits:   { cpu: "125m", memory: "250Mi", ephemeral-storage: "1Gi" }
-          readinessProbe:
-            tcpSocket: { port: 3001 }
-            initialDelaySeconds: 10
-            periodSeconds: 10

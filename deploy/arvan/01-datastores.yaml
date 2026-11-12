@@ -58,9 +58,12 @@ spec:
             # directory and a PVC mount root may contain lost+found.
             - name: PGDATA
               value: /var/lib/postgresql/data/pgdata
+          # Halved: this catalogue is 483 products, and Postgres' default
+          # shared_buffers is 128MB. Elasticsearch keeps the larger block
+          # because its JVM heap alone is 512MB.
           resources:
-            requests: { cpu: "500m", memory: "1000Mi", ephemeral-storage: "1Gi" }
-            limits:   { cpu: "500m", memory: "1000Mi", ephemeral-storage: "1Gi" }
+            requests: { cpu: "250m", memory: "500Mi", ephemeral-storage: "1Gi" }
+            limits:   { cpu: "250m", memory: "500Mi", ephemeral-storage: "1Gi" }
           readinessProbe:
             exec:
               command: ["pg_isready", "-U", "techstore", "-d", "techstore"]
@@ -76,7 +79,7 @@ spec:
         accessModes: ["ReadWriteOnce"]
         resources:
           requests:
-            storage: 10Gi
+            storage: 1Gi
 ---
 apiVersion: v1
 kind: Service
@@ -147,4 +150,4 @@ spec:
         accessModes: ["ReadWriteOnce"]
         resources:
           requests:
-            storage: 5Gi
+            storage: 1Gi
